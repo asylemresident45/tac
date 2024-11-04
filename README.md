@@ -90,57 +90,158 @@ bash
 cd takserver-docker-5.2-RELEASE-43/
 
 This command ensures you are in the correct directory to access the Dockerfiles and other resources required for the subsequent commands.
-
-Build the Database Docker Image:
-
-Next, you will build the database Docker image by executing the following command:
-
-bash
-
-docker build -t takserver-db:"$(cat tak/version.txt)" -f docker/Dockerfile.takserver-db .
-
-This command builds a Docker image named takserver-db and tags it with the version specified in version.txt. The -f option indicates the specific Dockerfile to use. Building this image is essential for setting up the database component of your TAC server.
-
-Create a Docker Network:
-
-Now, create a Docker network for your containers by running:
-
-bash
-
-docker network create takserver-"$(cat tak/version.txt)"
-
-This command establishes a new Docker network named takserver-<version>. A dedicated network allows the containers to communicate securely while isolating them from others, maintaining the integrity of your application.
-
-Run the Database Container:
-
-Next, start the database container with the following command:
-
-bash
-
-docker run -d -v $(pwd)/tak:/opt/tak:z -p 5432:5432 --network takserver-"$(cat tak/version.txt)" --name takserver-db takserver-db:"$(cat tak/version.txt)"
-
-This command runs the takserver-db image in detached mode. The -v option mounts the tak directory to /opt/tak in the container for data persistence. The -p option maps port 5432 on the host to port 5432 in the container, enabling access to the database.
-
-Build the TAC Server Docker Image:
-
-Now, proceed to build the TAC server Docker image by executing:
-
-bash
-
-docker build -t takserver:"$(cat tak/version.txt)" -f docker/Dockerfile.takserver .
-
-This command builds another Docker image named takserver using the Dockerfile.takserver. This image contains the main application for TAC.
-
-Run the TAC Server Container:
-
-Next, run the TAC server container with the following command:
-
-bash
-
-docker run -d -v $(pwd)/tak:/opt/tak:z -p 8089:8089 -p 8443:8443 -p 8444:8444 -p 9000:9000 --network takserver-"$(cat tak/version.txt)" --name takserver takserver:"$(cat tak/version.txt)"
-
-This command starts the takserver image in detached mode, with multiple ports (8089, 8443, 8444, 9000) mapped from the host to the container. This setup allows external access to different services provided by the TAC application.
-
+_______________________________________________________________________________________________________________________________________________
+1. Open tak/CoreConfig.example.xml and set a database password
+2. Make any other configuration changes you need
+TAK Server Database Container Setup:
+    1. Build TAK server database image:
+    > docker build -t takserver-db:"$(cat tak/version.txt)" -f docker/Dockerfile.takserver-db .
+    2. Create a new docker network for the current tak version:
+    > docker network create takserver-"$(cat tak/version.txt)"
+3. The TAK Server database container can be configured to persist data directly to the host or only
+within the container.
+a. To persist to the host, create an empty host directory (unless you have a directory from a
+previous docker install you want to reuse). For upgrading purposes, we recommend that you
+keep the takserver database directory outside of the 'takserver-docker-<version>' directory
+structure.
+> docker run -d -v <absolute path to takserver database directory>:/var/lib/postgresql/data:z -v
+$(pwd)/tak:/opt/tak:z -it -p 5432:5432 --network takserver-"$(cat tak/version.txt)" --network-alias tak-
+database --name takserver-db-"$(cat tak/version.txt)" takserver-db:"$(cat tak/version.txt)"
+b. To run TAK server database with container only persistence
+> docker run -d -v $(pwd)/tak:/opt/tak:z -it -p 5432:5432 --network takserver-"$(cat tak/version.txt)" --
+network-alias tak-database --name takserver-db-"$(cat tak/version.txt)" takserver-db:"$(cat
+tak/version.txt)"
+37
+TAK Server Container Setup:
+1. Build TAK Server image:
+> docker build -t takserver:"$(cat tak/version.txt)" -f docker/Dockerfile.takserver .
+2. Running TAK Server container: use -p <host port>:<container port> to map any additional ports you
+have configured. Adding new inputs or changing ports while the container is running will require
+the container to be recreated so that the new port mapping can be added.
+> docker run -d -v $(pwd)/tak:/opt/tak:z -it -p 8089:8089 -p 8443:8443 -p 8444:8444 -p 8446:8446 -p
+9000:9000 -p 9001:9001 --network takserver-"$(cat tak/version.txt)" --name takserver-"$(cat
+tak/version.txt)" takserver:"$(cat tak/version.txt)"
+2. Before using the TAK Server, you must setup the certificates for secure operation. If you have
+already configured certificates you can skip this step. You can also copy existing certificates into
+'tak/certs/files' and a UserAuthetication.xml file into 'tak/' to reuse existing certificate authentication
+settings. Any change to certificates while the container is running will require either a TAK server
+restart or container restart. Additional certificate details can be found in Appendix B.
+a. Edit tak/certs/cert-metadata.sh
+b. Generate root ca
+> docker exec -it takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/certs && ./makeRootCa.sh"
+c. Generate server cert
+> docker exec -it takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/certs && ./makeCert.sh server
+takserver"
+d. Create client cert(s)
+> docker exec -it takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/certs && ./makeCert.sh client
+<user>"
+e. Restart takserver to load new certificates
+> docker exec -d takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/ && ./configureInDocker.sh"
+f. Tail takserver logs from the host. Once TAK server has successfully started, proceed to the
+next step.
+> tail -f tak/logs/takserver-messaging.log
+> tail -f tak/logs/takserver-api.log
+38
+3. Accessing takserver
+Create admin client certificate for access on secure port 8443 (https):
+> docker exec takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/ && java -jar
+utils/UserManager.jar certmod -A certs/files/<client cert>.pem"
+Hardened TAK Server Setup:
+The hardened TAK Database and Server containers provide additional security by including the use of
+secure Iron Bank base images, container health checks, and minimizing user privileges within the
+containers.
+The hardened TAK images are available in a zip file, takserver-docker-hardened-<version>.zip. The
+steps for setting up the hardened containers are similar to the standard docker installation steps given
+above except for the following:
+Certificate Generation:
+The certificate generation container is only required to run once for TAK Server initialization. Run all
+commands in this section from the root of the unzipped hardened docker contents.
+1. Build the Certificate Authority Setup Image:
+< docker build -t ca-setup-hardened --build-arg ARG_CA_NAME=<CA_NAME> --build-arg
+ARG_STATE=<ST> --build-arg ARG_CITY=<CITY> --build-arg
+ARG_ORGANIZATIONAL_UNIT=<UNIT> -f docker/Dockerfile.ca .
+2. Run the Certificate Authority Setup Container: If certificates have previously been generated and
+exist in the tak/cert/files path when building the ca-setup-hardened image then certificate generation
+will be skipped at runtime.
+<docker run --name ca-setup-hardened -it -d ca-setup-hardened
+3. Copy the generated certificates for TAK Server:
+> docker cp ca-setup-hardened:/tak/certs/files files
+> [ -d tak/certs/files ] || mkdir tak/certs/files \
+&& docker cp ca-setup-hardened:/tak/certs/files/takserver.jks tak/certs/files/ \
+&& docker cp ca-setup-hardened:/tak/certs/files/truststore-root.jks tak/certs/files/ \
+&& docker cp ca-setup-hardened:/tak/certs/files/fed-truststore.jks tak/certs/files/ \
+&& docker cp ca-setup-hardened:/tak/certs/files/admin.pem tak/certs/files/ \
+&& docker cp ca-setup-hardened:/tak/certs/files/config-takserver.cfg tak/certs/files/
+39
+TAK Server Database Hardened Container Setup:
+1. Building the hardened docker images requires creating an Iron Bank/Repo1 account to access the
+approved base images. To create an account, follow the instructions in the IronBank Getting Started
+page. To download the base images via the CLI, see the instructions in the Registry Access section.
+After obtaining the necessary credentials, run:
+< docker login registry1.dso.mil
+2. Follow the instructions in the TAK Server CoreConfig Setup section and update the <connection-
+url> tag with the hardened TAK Database container name. For example:
+<connection url="jdbc:postgresql://tak-database-hardened-<version>:5432/cot" username="martiuser"
+password=<password>/>
+3. Create a new docker network for the current tak version:
+> docker network create takserver-net-hardened-"$(cat tak/version.txt)"
+Ensure in the db-utils/pg_hba.conf file that there is an entry for the subnet of the hardened takserver
+network. To determine the subnet of the network:
+< docker network inspect takserver-net-hardened-"$(cat tak/version.txt)"
+Or to specify the subnet on network creation:
+< docker network create takserver-net-hardened-"$(cat tak/version.txt)" --subnet=<subnet>
+4. Build the hardened TAK Database image:
+<docker build -t tak-database-hardened:"$(cat tak/version.txt)" -f docker/Dockerfile.hardened-
+takserver-db .
+5. Run the hardened TAK Database container:
+< docker run --name tak-database-hardened-"$(cat tak/version.txt)" --network takserver-net-
+hardened-"$(cat tak/version.txt)" --network-alias tak-database -d tak-database-hardened:"$(cat
+tak/version.txt)" -p 5432:5432
+TAK Server Hardened Container Setup
+1. Build the hardened TAK Server image:
+< docker build -t takserver-hardened:"$(cat tak/version.txt)" -f docker/Dockerfile.hardened-takserver .
+2. Run the hardened TAK Server container:
+40
+< docker run --name takserver-hardened-"$(cat tak/version.txt)" --network takserver-net-hardened-"$
+(cat tak/version.txt)" -p 8089:8089 -p 8443:8443 -p 8444:8444 -p 8446:8446 -t -d takserver-
+hardened:"$(cat tak/version.txt)"
+Configuring Certificates
+1. Get the admin certificate fingerprint
+> docker exec -it ca-setup-hardened bash -c "openssl x509 -noout -fingerprint -md5 -inform pem -in
+files/admin.pem | grep -oP 'MD5 Fingerprint=\K.*'"
+2. Add the certificate fingerprint as the admin after the hardened TAK server container has started
+(about 60 seconds)
+> docker exec -it takserver-hardened-"$(cat tak/version.txt)" bash -c 'java -jar
+/opt/tak/utils/UserManager.jar usermod -A -f <admin cert fingerprint> admin'
+Useful Commands
+*To run these commands on the hardened containers, add the -hardened suffix to the container names.
+• View images:
+> docker images takserver
+> docker images takserver-db
+• View containers
+All: > docker ps -a
+Running: > docker ps
+Stopped: > docker ps -a | grep Exit
+• Exec into container
+> docker exec -it takserver-"$(cat tak/version.txt)" bash
+> docker exec -it takserver-db-"$(cat tak/version.txt)" bash
+• Exec command in container
+> docker exec -it takserver-"$(cat tak/version.txt)" bash -c "<command>"
+> docker exec -it takserver-db-"$(cat tak/version.txt)" bash -c "<command>"
+• Tail takserver logs
+> tail -f tak/logs/takserver-messaging.log
+> tail -f tak/logs/takserver-api.log
+• Restart TAK server
+41
+> docker exec -d takserver-"$(cat tak/version.txt)" bash -c "cd /opt/tak/ &&
+./configureInDocker.sh"
+• Start/Stop container:
+> docker <start/stop> takserver-"$(cat tak/version.txt)"
+> docker <start/stop> takserver-db-"$(cat tak/version.txt)"
+• Remove container:
+> docker rm -f takserver-"$(cat tak/version.txt)"
+> docker rm -f takserver-db-"$(cat tak/version.txt)"
+_______________________________________________________________________________________________________________________________________________
 List Running Containers:
 
 To verify that your containers are running correctly, use the following command:
